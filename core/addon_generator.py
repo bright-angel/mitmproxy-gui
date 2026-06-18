@@ -2,12 +2,15 @@ import os
 import textwrap
 
 
-def generate_addon_script(rules, proxy_key, rules_dir, output_path):
+def generate_addon_script(rules, proxy_key, rules_dir, output_path, upstream=""):
     """
     Generate a combined mitmproxy addon script for a proxy instance.
 
     proxy_key: "proxy1" or "proxy2" — which script to load per rule.
     rules_dir: base directory for rule subdirectories.
+    upstream: "host:port" — if set, redirect server connections to this
+              address after rule scripts process the request.  This avoids
+              mitmproxy's mode=["upstream:..."] which bypasses addon hooks.
 
     Uses Python's logging module (bypasses mitmproxy ctx.log) so that
     LogHandler attached to the "mitmproxy" logger reliably captures
@@ -45,7 +48,26 @@ def generate_addon_script(rules, proxy_key, rules_dir, output_path):
         lines.append('    },')
         lines.append('')
 
+    # Parse upstream for in-addon server redirection
+    # mitmproxy 12 requires ServerSpec = (scheme, (host, port))
+    upstream_spec = None
+    upstream_display = None
+    if upstream:
+        host, _, port_str = upstream.partition(":")
+        try:
+            upstream_spec = ('http', (host, int(port_str)))
+            upstream_display = f"{host}:{port_str}"
+        except ValueError:
+            pass
+
     lines.append(']')
+    lines.append('')
+    if upstream_spec:
+        lines.append(f'_UPSTREAM = {upstream_spec!r}')
+        lines.append(f'_UPSTREAM_DISPLAY = {upstream_display!r}')
+    else:
+        lines.append('_UPSTREAM = None')
+        lines.append('_UPSTREAM_DISPLAY = None')
     lines.append('')
     lines.append(textwrap.dedent('''
     _logger.info("Addon loaded, %d rule(s) registered", len(_RULES))
@@ -87,8 +109,8 @@ def generate_addon_script(rules, proxy_key, rules_dir, output_path):
             for rule in _RULES:
                 try:
                     if re.search(rule["pattern"], url):
-                        _logger.info("[命中规则] %s — 请求: %s %s",
-                                     rule["name"], flow.request.method, url)
+                        _logger.info("[命中规则] %s — 请求 #%s: %s %s",
+                                     rule["name"], flow.id[:8], flow.request.method, url)
                         module = _load_module(rule["script_path"])
                         if module and hasattr(module, "request"):
                             try:
@@ -96,6 +118,9 @@ def generate_addon_script(rules, proxy_key, rules_dir, output_path):
                             except Exception as e:
                                 _logger.error("[脚本异常] %s request(): %s",
                                               rule["name"], e)
+                        if _UPSTREAM:
+                            _logger.info("[上游代理] → %s", _UPSTREAM_DISPLAY)
+                            flow.server_conn.via = _UPSTREAM
                         return
                 except re.error:
                     continue
@@ -106,8 +131,8 @@ def generate_addon_script(rules, proxy_key, rules_dir, output_path):
             for rule in _RULES:
                 try:
                     if re.search(rule["pattern"], url):
-                        _logger.info("[命中规则] %s — 响应: %s %s",
-                                     rule["name"], flow.response.status_code, url)
+                        _logger.info("[命中规则] %s — 响应 #%s: %s %s",
+                                     rule["name"], flow.id[:8], flow.response.status_code, url)
                         module = _load_module(rule["script_path"])
                         if module and hasattr(module, "response"):
                             try:

@@ -34,6 +34,7 @@ def build():
         "--hidden-import", "core",
         "--hidden-import", "core.config_manager",
         "--hidden-import", "core.proxy_manager",
+        "--hidden-import", "core.proxy_worker",
         "--hidden-import", "core.rule_engine",
         "--hidden-import", "core.cert_manager",
         "--hidden-import", "core.addon_generator",

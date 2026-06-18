@@ -42,6 +42,8 @@ def first_run_setup(app_dir, user_data_dir):
 
 
 def main():
+    import multiprocessing
+    multiprocessing.freeze_support()
     app_dir = get_app_dir()
     user_data_dir = get_user_data_dir()
     first_run_setup(app_dir, user_data_dir)
