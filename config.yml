@@ -1,0 +1,14 @@
+proxy1:
+  listen_port: 8081
+  listen_host: 127.0.0.1
+  upstream: 127.0.0.1:8080
+  upstream_enabled: true
+proxy2:
+  listen_port: 8082
+  listen_host: 127.0.0.1
+  upstream: ''
+  upstream_enabled: false
+settings:
+  ssl_insecure: true
+  http2: true
+  ssl_verify_upstream_trusted_ca: ''

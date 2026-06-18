@@ -5,3 +5,6 @@ dist/
 build/
 *.spec
 *.zip
+*.bak
+scripts.bak/
+rules.json.bak

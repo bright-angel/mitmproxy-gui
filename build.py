@@ -18,11 +18,11 @@ def build():
 
     PyInstaller.__main__.run([
         os.path.join(base_dir, "main.py"),
-        "--name=MimtproxyTool",
+        "--name=MitmproxyTool",
         "--windowed",
         "--onefile",
-        "--add-data", f"{base_dir}/config.json;.",
-        "--add-data", f"{base_dir}/scripts;scripts",
+        "--add-data", f"{base_dir}/config.yml;.",
+        "--add-data", f"{base_dir}/rules;rules",
         "--add-data", f"{base_dir}/generated;generated",
         "--hidden-import", "mitmproxy",
         "--hidden-import", "mitmproxy.addons",
@@ -30,6 +30,7 @@ def build():
         "--hidden-import", "mitmproxy.options",
         "--hidden-import", "mitmproxy.proxy",
         "--hidden-import", "mitmproxy.proxy.server",
+        "--hidden-import", "yaml",
         "--hidden-import", "core",
         "--hidden-import", "core.config_manager",
         "--hidden-import", "core.proxy_manager",

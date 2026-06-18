@@ -19,19 +19,18 @@ from core.proxy_manager import ProxyManager
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, user_data_dir):
         super().__init__()
         self.setWindowTitle("Mitmproxy 代理工具")
         self.setMinimumSize(1000, 700)
 
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        self.config_path = os.path.join(base_dir, "config.json")
-        self.rules_path = os.path.join(base_dir, "rules.json")
-        self.scripts_dir = os.path.join(base_dir, "scripts")
-        self.generated_dir = os.path.join(base_dir, "generated")
+        self.user_data_dir = user_data_dir
+        self.config_path = os.path.join(user_data_dir, "config.yml")
+        self.rules_dir = os.path.join(user_data_dir, "rules")
+        self.generated_dir = os.path.join(user_data_dir, "generated")
 
         self.config_manager = ConfigManager(self.config_path)
-        self.rule_engine = RuleEngine(self.rules_path)
+        self.rule_engine = RuleEngine(self.rules_dir)
         self.proxy_manager = ProxyManager(self.generated_dir)
 
         self._setup_ui()
@@ -72,7 +71,7 @@ class MainWindow(QMainWindow):
         self.tab_widget = QTabWidget()
         main_layout.addWidget(self.tab_widget)
 
-        self.rule_panel = RulePanel(self.rule_engine, self.scripts_dir)
+        self.rule_panel = RulePanel(self.rule_engine)
         self.tab_widget.addTab(self.rule_panel, "规则")
 
         script_container = QWidget()
@@ -109,8 +108,8 @@ class MainWindow(QMainWindow):
         p1 = "运行中" if self.proxy_manager.proxy1_running else "已停止"
         p2 = "运行中" if self.proxy_manager.proxy2_running else "已停止"
         total = len(self.rule_engine.rules)
-        enabled = len([r for r in self.rule_engine.rules if r.enabled])
-        self.status_bar.showMessage(f"代理1: {p1} | 代理2: {p2} | 规则: {enabled}/{total} 启用")
+        active = len([r for r in self.rule_engine.rules if r.is_active])
+        self.status_bar.showMessage(f"代理1: {p1} | 代理2: {p2} | 规则: {active}/{total} 活跃")
 
     def _start_proxy1(self):
         cfg = self.proxy_control.get_proxy1_config()
@@ -118,8 +117,9 @@ class MainWindow(QMainWindow):
             port=cfg["port"],
             listen_host=cfg["host"],
             upstream=cfg["upstream"],
+            upstream_enabled=cfg["upstream_enabled"],
             rules=self.rule_engine.rules,
-            scripts_dir=self.scripts_dir,
+            rules_dir=self.rules_dir,
             proxy_settings=self.config_manager.get_settings(),
             log_callback=self.log_viewer.add_log
         )
@@ -145,8 +145,9 @@ class MainWindow(QMainWindow):
             port=cfg["port"],
             listen_host=cfg["host"],
             upstream=cfg["upstream"],
+            upstream_enabled=cfg["upstream_enabled"],
             rules=self.rule_engine.rules,
-            scripts_dir=self.scripts_dir,
+            rules_dir=self.rules_dir,
             proxy_settings=self.config_manager.get_settings(),
             log_callback=self.log_viewer.add_log
         )
@@ -178,12 +179,12 @@ class MainWindow(QMainWindow):
         if self.proxy_manager.proxy1_running:
             from core.addon_generator import generate_addon_script
             addon_path = os.path.join(self.generated_dir, "addon_proxy1.py")
-            generate_addon_script(self.rule_engine.rules, "proxy1", self.scripts_dir, addon_path)
+            generate_addon_script(self.rule_engine.rules, "proxy1", self.rules_dir, addon_path)
             self.log_viewer.add_log("代理1 插件已更新")
         if self.proxy_manager.proxy2_running:
             from core.addon_generator import generate_addon_script
             addon_path = os.path.join(self.generated_dir, "addon_proxy2.py")
-            generate_addon_script(self.rule_engine.rules, "proxy2", self.scripts_dir, addon_path)
+            generate_addon_script(self.rule_engine.rules, "proxy2", self.rules_dir, addon_path)
             self.log_viewer.add_log("代理2 插件已更新")
 
     def _open_script_in_editor(self, file_path):

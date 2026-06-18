@@ -1,0 +1,4 @@
+name: httpbin.org
+url_pattern: https://httpbin.org/*
+proxy1_enabled: true
+proxy2_enabled: true

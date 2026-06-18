@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -11,6 +12,23 @@ _CONNECTION_HEADERS = {
     "connection", "keep-alive", "proxy-connection",
     "transfer-encoding", "upgrade", "te",
 }
+
+# mitmproxy internal log prefixes to suppress
+_NOISY_PREFIXES = (
+    "server connection", "server connect", "server disconnect",
+    "client connection", "client connect", "client disconnect",
+    "TCP", "UDP", "websocket",
+    "HTTP/2 connection", "HTTP/2 stream",
+    "ALPN", "TLS handshake", "TLS Error:",
+    "Unhandled error in task",
+    "Traceback (most recent call last)",
+    "HTTP(S) proxy",  # "listening at ..." noise
+)
+
+
+def _addon_channel(proxy_key):
+    """Dedicated logger name per proxy to prevent cross-capture."""
+    return f"mitmproxy_addon_{proxy_key}"
 
 
 class ConnectionHeaderCleaner:
@@ -41,6 +59,8 @@ class ProxyInstance:
         self.thread = None
         self.loop = None
         self._running = False
+        self._log_handler = None
+        self._log_channel = None
 
     @property
     def is_running(self):
@@ -66,6 +86,14 @@ class ProxyInstance:
             pass
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
+        # Clean up logging handler to avoid duplicates on restart
+        if self._log_handler and self._log_channel:
+            try:
+                logging.getLogger(self._log_channel).removeHandler(self._log_handler)
+            except Exception:
+                pass
+            self._log_handler = None
+            self._log_channel = None
         return True, f"{self.name} 已停止"
 
     def _run_event_loop(self):
@@ -93,7 +121,17 @@ class ProxyInstance:
             self.master.addons.add(*default_addons())
             self.master.addons.add(ConnectionHeaderCleaner())
             if self.log_callback:
-                self.master.addons.add(LogAddon(self.name, self.log_callback))
+                self.master.addons.add(ProxyLogAddon(self.name, self.log_callback))
+                # Dedicated logger per proxy so each handler only
+                # receives its own addon's messages.
+                channel = _addon_channel(self.name.lower())
+                logger = logging.getLogger(channel)
+                logger.setLevel(logging.INFO)
+                logger.propagate = False
+                self._log_handler = LogHandler(self.name, self.log_callback)
+                self._log_handler.setFormatter(logging.Formatter("%(message)s"))
+                logger.addHandler(self._log_handler)
+                self._log_channel = channel
             if self.addon_script_path:
                 try:
                     self.master.addons.add(ScriptAddon(self.addon_script_path))
@@ -112,26 +150,80 @@ class ProxyInstance:
                 pass
 
 
-class LogAddon:
-    """Logs lifecycle and errors. Suppresses noise from connection-level errors."""
+class LogHandler(logging.Handler):
+    """Intercept Python logging records emitted by mitmproxy internals."""
+
+    def __init__(self, proxy_name, callback):
+        super().__init__()
+        self.proxy_name = proxy_name
+        self.callback = callback
+        self.setLevel(logging.DEBUG)
+
+    def emit(self, record):
+        level = record.levelname.lower()
+        msg = self.format(record)
+
+        if level == "debug":
+            return
+        if msg:
+            low = msg.lower()
+            if low.startswith(_NOISY_PREFIXES):
+                return
+
+        self.callback((level, f"[{self.proxy_name}] {msg}"))
+
+
+class ProxyLogAddon:
+    """mitmproxy addon for lifecycle, errors, and capturing ctx.log from scripts.
+
+    ctx.log (info/error/warning) in mitmproxy dispatches through the addon 'log'
+    event, NOT through Python's logging module.  Both mechanisms are needed:
+    - LogHandler captures Python logging (mitmproxy internals)
+    - ProxyLogAddon.log() captures ctx.log from addon scripts
+    """
+
     def __init__(self, proxy_name, callback):
         self.proxy_name = proxy_name
         self.callback = callback
+        self._first_request = True
 
     def running(self):
-        self.callback(f"[{self.proxy_name}] 代理已启动")
+        self.callback(("info", f"[{self.proxy_name}] 代理已启动"))
 
     def done(self):
-        self.callback(f"[{self.proxy_name}] 代理已关闭")
+        self.callback(("info", f"[{self.proxy_name}] 代理已关闭"))
+
+    def request(self, flow):
+        """Diagnostic: log the first request to confirm this proxy is receiving traffic."""
+        if self._first_request:
+            self._first_request = False
+            self.callback(("info",
+                f"[{self.proxy_name}] [诊断] 收到首个请求: {flow.request.method} {flow.request.pretty_url}"))
+
+    def log(self, entry):
+        """Capture ctx.log messages from addon scripts via mitmproxy addon event."""
+        level = getattr(entry, "level", None) or "info"
+        msg = getattr(entry, "msg", None) or str(entry)
+
+        if level in ("debug",):
+            return
+        if msg and level == "info":
+            low = msg.lower()
+            if low.startswith(_NOISY_PREFIXES):
+                return
+
+        self.callback((level, f"[{self.proxy_name}] {msg}"))
 
     def error(self, flow):
         msg = str(flow.error)
-        # Suppress noisy HTTP/2 connection-level errors
         if "Connection-specific header field" in msg:
             return
         if "HTTP/2 protocol error" in msg:
             return
-        self.callback(f"[{self.proxy_name}] 错误: {flow.error}")
+        self.callback(("error", f"[{self.proxy_name}] {flow.error}"))
+
+    def server_connect_error(self, data):
+        self.callback(("warning", f"[{self.proxy_name}] 上游连接失败: {data}"))
 
 
 class ScriptAddon:
@@ -149,7 +241,10 @@ class ScriptAddon:
             spec = importlib.util.spec_from_file_location("generated_addon", self.script_path)
             self.module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(self.module)
-        except Exception:
+        except Exception as e:
+            logging.getLogger("mitmproxy").error(
+                "Failed to load addon script %s: %s", self.script_path, e
+            )
             self.module = None
 
     def _maybe_reload(self):
@@ -188,22 +283,28 @@ class ProxyManager:
         self.proxy1 = None
         self.proxy2 = None
 
-    def start_proxy1(self, port, listen_host, upstream, rules, scripts_dir,
-                     proxy_settings=None, log_callback=None):
+    def start_proxy1(self, port, listen_host, upstream, rules, rules_dir,
+                     proxy_settings=None, log_callback=None,
+                     upstream_enabled=True):
         addon_path = os.path.join(self.generated_dir, "addon_proxy1.py")
         from .addon_generator import generate_addon_script
-        generate_addon_script(rules, "proxy1", scripts_dir, addon_path)
-        self.proxy1 = ProxyInstance("Proxy1", port, listen_host, upstream,
-                                    addon_path, proxy_settings, log_callback)
+        generate_addon_script(rules, "proxy1", rules_dir, addon_path)
+        effective_upstream = upstream if upstream_enabled else ""
+        self.proxy1 = ProxyInstance("Proxy1", port, listen_host,
+                                    effective_upstream, addon_path,
+                                    proxy_settings, log_callback)
         return self.proxy1.start()
 
-    def start_proxy2(self, port, listen_host, upstream, rules, scripts_dir,
-                     proxy_settings=None, log_callback=None):
+    def start_proxy2(self, port, listen_host, upstream, rules, rules_dir,
+                     proxy_settings=None, log_callback=None,
+                     upstream_enabled=True):
         addon_path = os.path.join(self.generated_dir, "addon_proxy2.py")
         from .addon_generator import generate_addon_script
-        generate_addon_script(rules, "proxy2", scripts_dir, addon_path)
-        self.proxy2 = ProxyInstance("Proxy2", port, listen_host, upstream,
-                                    addon_path, proxy_settings, log_callback)
+        generate_addon_script(rules, "proxy2", rules_dir, addon_path)
+        effective_upstream = upstream if upstream_enabled else ""
+        self.proxy2 = ProxyInstance("Proxy2", port, listen_host,
+                                    effective_upstream, addon_path,
+                                    proxy_settings, log_callback)
         return self.proxy2.start()
 
     def stop_proxy1(self):
